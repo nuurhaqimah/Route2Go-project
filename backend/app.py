@@ -410,8 +410,12 @@ def admin_list_pois():
     try:
         # Try selecting with travel_style and created_at ordering
         try:
+            # Curated rows first so the admin panel reads as a CMS of
+            # hand-picked places, with fetched ones below.
             rows = db_query_db(
-                "SELECT id, name, category, description, location, country, budget_level, travel_style FROM poi ORDER BY created_at DESC"
+                "SELECT id, name, category, description, location, country, "
+                "budget_level, travel_style, source, popularity, fetched_at "
+                "FROM poi ORDER BY (source = 'local') DESC, created_at DESC"
             )
             pois = [
                 {
@@ -422,7 +426,10 @@ def admin_list_pois():
                     "location": r[4],
                     "country": r[5],
                     "budget_level": r[6],
-                    "travel_style": r[7]
+                    "travel_style": r[7],
+                    "source": r[8],
+                    "popularity": r[9],
+                    "fetched_at": r[10].isoformat() if r[10] else None,
                 }
                 for r in rows
             ]
@@ -575,6 +582,7 @@ def chat():
     user_message = data.get("message", "")
     user_id = data.get("user_id", session.get('user', {}).get('id', 'guest'))
     prefs = data.get("prefs", {})  # expects keys: interests (category), budget, travel_style, location
+    lower_msg = user_message.lower()
 
     # --- STEP 1: Gemini System Prompt is configured globally via prompts.SYSTEM_PROMPT ---
     # If Gemini is not available, we will still proceed with rule-based flow and friendly fallbacks.
