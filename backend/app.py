@@ -1,26 +1,14 @@
 import os
 import json
 import urllib.parse
-import psycopg2
-import requests
 import google.generativeai as genai
-import re
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
-from database import save_itinerary, get_pois, query_db as db_query_db
+from database import get_pois, query_db as db_query_db
 from prompts import SYSTEM_PROMPT
-from flask import Flask, request, jsonify, render_template, send_file, session, redirect
+from flask import Flask, request, jsonify, render_template, session, redirect
 from flask_cors import CORS
 from datetime import datetime
-from amadeus import Client, ResponseError
-import tempfile
-
-try:
-    from weasyprint import HTML
-    WEASYPRINT_AVAILABLE = True
-except Exception:
-    WEASYPRINT_AVAILABLE = False
-    HTML = None
 
 # Load environment variables
 load_dotenv()
@@ -36,22 +24,10 @@ if GEMINI_API_KEY:
 else:
     print("GEMINI_API_KEY loaded: False")
 
-secret_key = os.getenv("SECRET_KEY", "supersecretkey")  # for sessions
-
-AMADEUS_API_KEY = os.getenv("AMADEUS_API_KEY")
-AMADEUS_API_SECRET = os.getenv("AMADEUS_API_SECRET")
-
-# Initialize Amadeus client
-amadeus = None
-if AMADEUS_API_KEY and AMADEUS_API_SECRET:
-    try:
-        amadeus = Client(
-            client_id=AMADEUS_API_KEY,
-            client_secret=AMADEUS_API_SECRET,
-            hostname='test'  # Use 'production' for live environment
-        )
-    except Exception as e:
-        print(f"Failed to initialize Amadeus client: {e}")
+secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY")  # for sessions
+if not secret_key:
+    secret_key = "supersecretkey"
+    print("WARNING: FLASK_SECRET_KEY not set — using an insecure default")
 
 # Initialize the generative model for text with system prompt if API key available
 gemini_model = None
@@ -59,7 +35,7 @@ try:
     if GEMINI_API_KEY:
         # Use imported SYSTEM_PROMPT for consistent behavior
         gemini_model = genai.GenerativeModel(
-            'gemini-1.5-flash',
+            os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
             system_instruction=SYSTEM_PROMPT
         )
 except Exception as e:
@@ -228,40 +204,8 @@ def delete_itinerary(user_id, it_id):
     db_query_db("DELETE FROM itinerary WHERE id=%s AND user_id=%s", (it_id, user_id))
     return jsonify({"message": "deleted"})
 
-# -------------------------
-# Export PDF
-# -------------------------
-@app.route("/export/<int:it_id>", methods=["GET"])
-@token_required
-def export_itinerary(user_id, it_id):
-    if not WEASYPRINT_AVAILABLE:
-        return jsonify({"error": "WeasyPrint not installed. Install weasyprint to enable PDF export."}), 500
-    r = db_query_db("SELECT title, description, data FROM itinerary WHERE id=%s AND user_id=%s", (it_id, user_id), one=True)
-    if not r:
-        return jsonify({"error": "not found"}), 404
-    title, description, data = r
-    html = render_itinerary_html(title, description, data or {})
-    pdf_dir = tempfile.gettempdir()
-    pdf_path = os.path.join(pdf_dir, f"itinerary_{it_id}.pdf")
-    HTML(string=html).write_pdf(pdf_path)
-    return send_file(pdf_path, as_attachment=True, download_name=f"itinerary_{it_id}.pdf")
-
-def render_itinerary_html(title, description, data):
-    items = data.get("schedule", []) if isinstance(data, dict) else []
-    html = f"<html><head><meta charset='utf-8'><style>body{{font-family: Arial;padding:20px}}img{{max-width:600px}}.slot{{margin-bottom:12px;border-bottom:1px solid #ddd;padding-bottom:8px}}</style></head><body>"
-    html += f"<h1>{title}</h1><p>{description}</p>"
-    for s in items:
-        start = s.get("start","")
-        end = s.get("end","")
-        name = s.get("name","")
-        notes = s.get("notes","")
-        img = s.get("image")
-        html += f"<div class='slot'><h3>{start} - {end}: {name}</h3><p>{notes}</p>"
-        if img:
-            html += f"<img src='{img}'/>"
-        html += "</div>"
-    html += "</body></html>"
-    return html
+# PDF export is handled client-side: /mytrips/<it_id>/export renders
+# print_itinerary.html, which calls window.print().
 
 # -------------------------
 # POI helper
@@ -459,7 +403,7 @@ def devtools():
     return '', 204
 
 # -------------------------
-# Amadeus helpers (flights + hotels)
+# Admin POI management
 # -------------------------
 @app.route("/admin/pois", methods=["GET"])
 def admin_list_pois():
@@ -616,54 +560,6 @@ def admin_update_poi(poi_id):
     except Exception as e:
         print(f"[ADMIN] Error updating POI: {e}")
         return jsonify({"status": "error", "message": "Failed to update POI"}), 500
-def get_amadeus_token():
-    url = "https://test.api.amadeus.com/v1/security/oauth2/token"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": AMADEUS_API_KEY,
-        "client_secret": AMADEUS_API_SECRET,
-    }
-    res = requests.post(url, headers=headers, data=data).json()
-    return res.get("access_token")
-
-def search_amadeus_flights(origin, destination, date):
-    token = get_amadeus_token()
-    url = f"https://test.api.amadeus.com/v2/shopping/flight-offers?originLocationCode={origin}&destinationLocationCode={destination}&departureDate={date}&adults=1&max=3"
-    headers = {"Authorization": f"Bearer {token}"}
-    res = requests.get(url, headers=headers).json()
-
-    flights = []
-    for offer in res.get("data", []):
-        price = offer["price"]["total"]
-        itinerary = offer["itineraries"][0]["segments"][0]
-        flights.append({
-            "airline": itinerary["carrierCode"],
-            "flight_number": itinerary["number"],
-            "departure": itinerary["departure"]["iataCode"],
-            "arrival": itinerary["arrival"]["iataCode"],
-            "price": price,
-            "currency": res["meta"]["currency"]
-        })
-    return flights
-
-def search_amadeus_hotels(city_code):
-    token = get_amadeus_token()
-    url = f"https://test.api.amadeus.com/v1/reference-data/locations?subType=CITY&keyword={city_code}"
-    headers = {"Authorization": f"Bearer {token}"}
-    res = requests.get(url, headers=headers).json()
-    hotels = []
-    for item in res.get("data", []):
-        hotels.append({
-            "name": item["name"],
-            "address": item["address"]["cityName"],
-            "price": "TBD",
-            "currency": "USD",
-            "rating": "4.5",
-            "image": "/static/assets/hotel1.jpg"
-        })
-    return hotels
-
 # -------------------------
 # Chatbot endpoint
 # -------------------------
@@ -682,32 +578,8 @@ def chat():
 
     # --- STEP 1: Gemini System Prompt is configured globally via prompts.SYSTEM_PROMPT ---
     # If Gemini is not available, we will still proceed with rule-based flow and friendly fallbacks.
-    # --- STEP 2: Amadeus check ---
-    lower_msg = user_message.lower()
-    try:
-        if "flight" in lower_msg or "pesawat" in lower_msg:
-            flights = search_amadeus_flights("CGK", "DPS", "2025-10-01")  # Example params
-            return jsonify({
-               "reply": "✈️ Here are some flight options you might consider:",
-               "flights": flights,
-               "itinerary": None,
-               "hotels": None
-           })
 
-        if "hotel" in lower_msg or "penginapan" in lower_msg:
-            hotels = search_amadeus_hotels("Bali")  # Example params
-            return jsonify({
-               "reply": "🏨 Here are some hotel options you might like:",
-               "hotels": hotels,
-               "flights": None,
-               "itinerary": None
-            })
-    except Exception:
-        # Silently ignore Amadeus errors and continue with conversational flow
-        pass
-
-
-    # --- STEP 3: Conversational flow + itinerary ---
+    # --- STEP 2: Conversational flow + itinerary ---
     try:
         # Per-user state
         state = conversation_state.setdefault(str(user_id), {
@@ -1123,102 +995,6 @@ def save_itinerary_legacy():
     except Exception as e:
         print(f"[LEGACY SAVE] error: {e}")
         return jsonify({"status": "error", "message": "Failed to save"}), 500
-
-# -------------------------
-# Flights Search (Amadeus)
-# -------------------------
-@app.route("/flights/search", methods=["POST"])
-@token_required
-def search_flights(user_id):
-    payload = request.json or {}
-    origin = payload.get("origin")       # e.g. "NYC"
-    destination = payload.get("destination") # e.g. "LON"
-    depart_date = payload.get("depart_date") # e.g. "2025-10-01"
-    return_date = payload.get("return_date") # optional
-    adults = payload.get("adults", 1)
-
-    if not origin or not destination or not depart_date:
-        return jsonify({"error": "origin, destination, and depart_date required"}), 400
-
-    try:
-        params = {
-            "originLocationCode": origin,
-            "destinationLocationCode": destination,
-            "departureDate": depart_date,
-            "adults": adults,
-            "currencyCode": "USD",
-            "max": 5
-        }
-        if return_date:
-            params["returnDate"] = return_date
-
-        if not amadeus:
-            return jsonify({"error": "Amadeus client not initialized. Check API credentials."}), 500
-        response = amadeus.shopping.flight_offers_search.get(**params)
-        offers = []
-        for item in response.data:
-            price = item["price"]["total"]
-            segments = []
-            for itin in item["itineraries"]:
-                for seg in itin["segments"]:
-                    segments.append({
-                        "from": seg["departure"]["iataCode"],
-                        "to": seg["arrival"]["iataCode"],
-                        "depart": seg["departure"]["at"],
-                        "arrive": seg["arrival"]["at"],
-                        "carrier": seg["carrierCode"]
-                    })
-            offers.append({"price": price, "segments": segments})
-        return jsonify(offers)
-    except ResponseError as e:
-        return jsonify({"error": str(e)}), 500
-    
-# -------------------------
-# Hotels Search (Amadeus)
-# -------------------------
-@app.route("/hotels/search", methods=["POST"])
-@token_required
-def search_hotels(user_id):
-    payload = request.json or {}
-    city_code = payload.get("city_code")    # e.g. "NYC"
-    check_in = payload.get("check_in")      # e.g. "2025-10-01"
-    check_out = payload.get("check_out")    # e.g. "2025-10-05"
-    adults = payload.get("adults", 1)
-
-    if not city_code or not check_in or not check_out:
-        return jsonify({"error": "city_code, check_in, and check_out required"}), 400
-
-    try:
-        if not amadeus:
-            return jsonify({"error": "Amadeus client not initialized. Check API credentials."}), 500
-        response = amadeus.shopping.hotel_offers.get(
-            cityCode=city_code,
-            checkInDate=check_in,
-            checkOutDate=check_out,
-            adults=adults
-        )
-        hotels = []
-        for h in response.data:
-            hotel = h["hotel"]
-            offers = h.get("offers", [])
-            hotels.append({
-                "name": hotel.get("name"),
-                "address": hotel.get("address", {}).get("lines"),
-                "rating": hotel.get("rating"),
-                "offers": [
-                    {
-                        "price": o["price"]["total"],
-                        "checkInDate": o.get("checkInDate"),
-                        "checkOutDate": o.get("checkOutDate"),
-                        "room": o.get("room", {}).get("typeEstimated", {}).get("category")
-                    }
-                    for o in offers
-                ]
-            })
-        return jsonify(hotels)
-    except ResponseError as e:
-        return jsonify({"error": str(e)}), 500
-
 
 # -------------------------
 # Run
