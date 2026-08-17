@@ -50,10 +50,10 @@ def init_db():
         );
         """)
 
-        # Recreate POIs (drop + create fresh schema)
-        cur.execute("DROP TABLE IF EXISTS poi CASCADE;")
+        # POIs — never dropped. Re-running this script must not destroy
+        # destination data; use sql/insert_poi.sql to (re)seed instead.
         cur.execute("""
-        CREATE TABLE poi (
+        CREATE TABLE IF NOT EXISTS poi (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             category TEXT,               -- e.g. nature/food/history/shopping
@@ -66,30 +66,19 @@ def init_db():
         );
         """)
 
-        # Seed sample POIs across multiple countries
-        sample_pois = [
-            # USA
-            ("Central Park", "nature", "Large park with trails and lakes.", "New York", "United States", "low", "relaxing"),
-            ("The Met Museum", "history", "One of the world's largest art museums.", "New York", "United States", "medium", "cultural"),
-            # France
-            ("Louvre Museum", "history", "Famous art museum in Paris.", "Paris", "France", "medium", "cultural"),
-            ("Montmartre Stroll", "nature", "Hilly neighborhood with scenic views.", "Paris", "France", "low", "relaxing"),
-            # Japan
-            ("Shibuya Crossing", "shopping", "Iconic scramble crossing and shopping area.", "Tokyo", "Japan", "low", "adventure"),
-            ("Meiji Shrine", "history", "Serene Shinto shrine surrounded by forest.", "Tokyo", "Japan", "low", "cultural"),
-            # Indonesia
-            ("Uluwatu Temple", "history", "Sea temple perched on a cliff.", "Bali", "Indonesia", "low", "cultural"),
-            ("Canggu Beach", "nature", "Surf-friendly beach with sunsets.", "Bali", "Indonesia", "low", "adventure"),
-        ]
-        for poi in sample_pois:
-            cur.execute(
-                """
-                INSERT INTO poi (name, category, description, location, country, budget_level, travel_style)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                """,
-                poi,
-            )
-        print("Sample POIs inserted (fresh table).")
+        # Seed the Southeast Asia destination set only when poi is empty, so
+        # re-running this script leaves existing destinations untouched.
+        cur.execute("SELECT count(*) FROM poi;")
+        existing = cur.fetchone()[0]
+        if existing:
+            print(f"POI table already has {existing} rows — left untouched.")
+        else:
+            seed_path = os.path.join(os.path.dirname(__file__), "sql", "insert_poi.sql")
+            with open(seed_path, encoding="utf-8") as f:
+                cur.execute(f.read())
+            cur.execute("SELECT count(*) FROM poi;")
+            print(f"Seeded {cur.fetchone()[0]} POIs from sql/insert_poi.sql.")
+            print("Run seed_food_data.py and seed_missing_data.py next for full coverage.")
 
         conn.commit()
         cur.close()
