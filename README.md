@@ -21,10 +21,12 @@ route2go/
 ├── frontend/
 │   ├── templates/        # HTML pages served by Flask
 │   └── static/           # CSS, JS, and image assets
-├── venv/                 # Python virtual environment
 ├── .gitignore
 └── README.md
 ```
+
+Flask serves the API and the HTML pages together — there is no separate frontend
+dev server. One `python app.py` runs the whole site.
 
 ## Prerequisites
 
@@ -71,10 +73,10 @@ Open `backend/.env` and fill in your values:
 | Variable                                 | Where to get it                                                                              |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `GEMINI_API_KEY`                         | [Google AI Studio](https://aistudio.google.com/) → Get API key                               |
-| `AMADEUS_API_KEY` / `AMADEUS_API_SECRET` | [Amadeus for Developers](https://developers.amadeus.com/) → Create app                       |
 | `DB_PASSWORD`                            | Your local PostgreSQL password                                                               |
 | `FLASK_SECRET_KEY`                       | Any long random string (e.g. run `python -c "import secrets; print(secrets.token_hex(32))"`) |
 | `ADMIN_PASS`                             | Choose a secure admin password                                                               |
+| `PORT`                                   | Port the site runs on. Defaults to `5000`; the template uses `5050`                            |
 
 ### 5. Create the PostgreSQL database
 
@@ -86,12 +88,19 @@ CREATE DATABASE itinerary_db;
 
 ### 6. Initialise the database
 
-This creates all tables and seeds sample POI data:
+Creates the tables, then seeds destinations from `sql/insert_poi.sql` if the POI
+table is empty. Existing destinations are never overwritten, so this is safe to
+re-run.
 
 ```bash
 # From inside the backend/ folder:
 python init_db.py
+python seed_food_data.py      # expanded food destinations
+python seed_missing_data.py   # fills category/budget gaps
 ```
+
+That gives you 170 destinations across Brunei, Malaysia, Singapore, Indonesia,
+Thailand, the Philippines, and Japan.
 
 ### 7. Run the app
 
@@ -100,7 +109,22 @@ python init_db.py
 python app.py
 ```
 
-Open your browser at **http://localhost:5000**
+Open your browser at **http://localhost:5050**
+
+---
+
+## Troubleshooting
+
+### `An attempt was made to access a socket in a way forbidden by its access permissions`
+
+Another program has claimed the port. Find out which:
+
+```powershell
+netsh http show servicestate view=requestq | Select-String ":5000/" -Context 20,0
+```
+
+Either stop that program, or pick a free port by changing `PORT` in
+`backend/.env`.
 
 ---
 
@@ -108,8 +132,8 @@ Open your browser at **http://localhost:5000**
 
 | Role         | Username              | Password                            | URL                               |
 | ------------ | --------------------- | ----------------------------------- | --------------------------------- |
-| Admin        | `admin`               | _(value of `ADMIN_PASS` in `.env`)_ | http://localhost:5000/admin       |
-| Regular user | _(register yourself)_ | _(your choice)_                     | http://localhost:5000/user/signup |
+| Admin        | `admin`               | _(value of `ADMIN_PASS` in `.env`)_ | http://localhost:5050/login       |
+| Regular user | _(register yourself)_ | _(your choice)_                     | http://localhost:5050/user/signup |
 
 ---
 
@@ -132,6 +156,5 @@ Open your browser at **http://localhost:5000**
 - **Backend** — Python, Flask, psycopg2
 - **AI** — Google Gemini 1.5 Flash
 - **Database** — PostgreSQL
-- **Flight & hotel search** — Amadeus API
 - **Frontend** — HTML, CSS, Vanilla JS
 - **PDF export** — Browser native print (`window.print()` via a dedicated print view)
