@@ -102,6 +102,21 @@ python seed_missing_data.py   # fills category/budget gaps
 That gives you 170 destinations across Brunei, Malaysia, Singapore, Indonesia,
 Thailand, the Philippines, and Japan.
 
+### 7. Fetch real destinations (optional)
+
+Pulls live tourist destinations from OpenStreetMap and ranks them by Wikipedia
+pageviews. No API key or signup required.
+
+```bash
+# From inside the backend/ folder:
+python refresh_external_pois.py --city "Kuala Lumpur" --country Malaysia
+python refresh_external_pois.py                  # every curated city
+python refresh_external_pois.py --stale-days 30  # only refresh older entries
+```
+
+Curated destinations are never overwritten — if a fetched place shares a name
+with one of yours, yours is kept. See [Destination sources](#destination-sources).
+
 ### 7. Run the app
 
 ```bash
@@ -151,10 +166,33 @@ Either stop that program, or pick a free port by changing `PORT` in
 
 ---
 
+## Destination sources
+
+Destinations come from two places, both stored in the `poi` table and told apart
+by its `source` column:
+
+| Source | Meaning | How it gets there |
+| ------- | ------------------------------------------------ | ---------------------------------- |
+| `local` | Hand-curated spots, including local secrets that aren't listed online | Admin panel, or the seed scripts |
+| `osm`   | Real destinations fetched from OpenStreetMap, ranked by Wikipedia pageviews | `refresh_external_pois.py`         |
+
+Results put curated spots first, then the most popular fetched ones. Places that
+OpenStreetMap marks as disused or permanently closed are filtered out on fetch.
+
+Two limitations worth knowing:
+
+- **No reviews or star ratings.** No free provider exposes them — Google charges
+  per call for the `reviews` field and Foursquare has no free tier for ratings.
+  Wikipedia pageviews stand in as a popularity signal instead.
+- **Budget and travel style are unknown for fetched places.** OpenStreetMap has
+  no equivalent, so those columns stay `NULL` rather than being guessed, and a
+  filter on either still admits them.
+
 ## Tech Stack
 
 - **Backend** — Python, Flask, psycopg2
 - **AI** — Google Gemini 1.5 Flash
 - **Database** — PostgreSQL
+- **Destination data** — OpenStreetMap (Overpass API) + Wikipedia pageviews
 - **Frontend** — HTML, CSS, Vanilla JS
 - **PDF export** — Browser native print (`window.print()` via a dedicated print view)

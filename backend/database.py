@@ -117,6 +117,15 @@ def get_pois(category=None, budget_level=None, travel_style=None, location=None,
     """
     Fetch POIs filtered by category (English/Bahasa normalized) and budget level.
     Returns a list of dicts.
+
+    Draws from both hand-curated rows (source='local') and rows cached from
+    OpenStreetMap (source='osm'). Curated entries are returned first, then the
+    most popular external ones, so results are recognisable places rather than
+    an arbitrary sample.
+
+    budget_level and travel_style are unknown for external POIs, so a filter on
+    either also admits rows where the column is NULL. Without this, asking for
+    a budget would silently exclude every fetched destination.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -135,11 +144,11 @@ def get_pois(category=None, budget_level=None, travel_style=None, location=None,
             params.append(normalized)
 
     if budget_level:
-        query += " AND budget_level = %s"
+        query += " AND (budget_level = %s OR budget_level IS NULL)"
         params.append(budget_level)
 
     if travel_style:
-        query += " AND travel_style ILIKE %s"
+        query += " AND (travel_style ILIKE %s OR travel_style IS NULL)"
         params.append(travel_style)
 
     if location:
@@ -150,7 +159,15 @@ def get_pois(category=None, budget_level=None, travel_style=None, location=None,
         query += " AND country ILIKE %s"
         params.append(country)
 
-    query += " ORDER BY RANDOM() LIMIT %s"
+    # Curated gems first, then popular external places, then anything else.
+    # RANDOM() only breaks ties, so repeat visits still feel varied without
+    # letting obscure POIs outrank famous ones.
+    query += """
+        ORDER BY (source = 'local') DESC,
+                 popularity DESC NULLS LAST,
+                 RANDOM()
+        LIMIT %s
+    """
     params.append(limit)
 
     try:
@@ -204,3 +221,83 @@ def get_pois(category=None, budget_level=None, travel_style=None, location=None,
         }
         for r in rows
     ]
+
+
+def upsert_external_pois(pois):
+    """
+    Cache externally fetched POIs into `poi`, keyed on external_id.
+
+    Curated rows always win: if a local entry already uses the same name in the
+    same country, the external copy is skipped so hand-written descriptions are
+    never overwritten by a generated one.
+
+    Returns (inserted, updated, skipped).
+    """
+    if not pois:
+        return (0, 0, 0)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    inserted = updated = skipped = 0
+    try:
+        for poi in pois:
+            cur.execute(
+                "SELECT 1 FROM poi WHERE source = 'local' "
+                "AND lower(name) = lower(%s) AND country ILIKE %s LIMIT 1",
+                (poi["name"], poi["country"]),
+            )
+            if cur.fetchone():
+                skipped += 1
+                continue
+
+            cur.execute(
+                """
+                INSERT INTO poi (name, category, description, location, country,
+                                 budget_level, travel_style, source, external_id,
+                                 lat, lon, popularity, fetched_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (external_id) WHERE external_id IS NOT NULL
+                DO UPDATE SET
+                    name        = EXCLUDED.name,
+                    category    = EXCLUDED.category,
+                    description = EXCLUDED.description,
+                    location    = EXCLUDED.location,
+                    lat         = EXCLUDED.lat,
+                    lon         = EXCLUDED.lon,
+                    popularity  = COALESCE(EXCLUDED.popularity, poi.popularity),
+                    fetched_at  = NOW()
+                RETURNING (xmax = 0) AS was_insert
+                """,
+                (
+                    poi["name"], poi["category"], poi["description"],
+                    poi["location"], poi["country"], poi.get("budget_level"),
+                    poi.get("travel_style"), poi.get("source", "osm"),
+                    poi["external_id"], poi.get("lat"), poi.get("lon"),
+                    poi.get("popularity"),
+                ),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                inserted += 1
+            else:
+                updated += 1
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] upsert_external_pois error: {e}")
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+    return (inserted, updated, skipped)
+
+
+def get_curated_locations():
+    """(location, country) pairs from curated rows — the cities we fetch for."""
+    rows = query_db(
+        "SELECT DISTINCT location, country FROM poi "
+        "WHERE source = 'local' AND location IS NOT NULL AND location <> '' "
+        "ORDER BY country, location"
+    )
+    return [(r[0], r[1]) for r in rows]

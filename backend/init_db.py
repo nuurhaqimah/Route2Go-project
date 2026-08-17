@@ -66,6 +66,25 @@ def init_db():
         );
         """)
 
+        # Hybrid-source columns. Added separately (rather than in the CREATE
+        # above) so existing databases pick them up on re-run.
+        #   source      'local' for hand-curated gems, 'osm' for fetched POIs
+        #   external_id stable provider key, e.g. 'osm:node/1234', for upserts
+        #   popularity  Wikipedia pageviews over the last 90 days; NULL if the
+        #               place has no Wikipedia article
+        #   fetched_at  when the row was last refreshed from the provider
+        for ddl in (
+            "ALTER TABLE poi ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'local'",
+            "ALTER TABLE poi ADD COLUMN IF NOT EXISTS external_id TEXT",
+            "ALTER TABLE poi ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION",
+            "ALTER TABLE poi ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION",
+            "ALTER TABLE poi ADD COLUMN IF NOT EXISTS popularity INTEGER",
+            "ALTER TABLE poi ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP",
+            "CREATE UNIQUE INDEX IF NOT EXISTS poi_external_id_key "
+            "ON poi (external_id) WHERE external_id IS NOT NULL",
+        ):
+            cur.execute(ddl)
+
         # Seed the Southeast Asia destination set only when poi is empty, so
         # re-running this script leaves existing destinations untouched.
         cur.execute("SELECT count(*) FROM poi;")
